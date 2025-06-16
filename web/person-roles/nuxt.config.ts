@@ -21,7 +21,7 @@ export default defineNuxtConfig({
   },
 
   css: [
-    '~/assets/css/tw.css'
+    resolve('./app/assets/css/tw.css')
   ],
 
   modules: [
@@ -31,7 +31,7 @@ export default defineNuxtConfig({
   ],
 
   extends: [
-    '@sbc-connect/nuxt-core-layer-beta'
+    '@dwol/nuxt-core-layer-test'
   ],
 
   router: {
