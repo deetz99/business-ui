@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { FormErrorEvent, Form, FormSubmitEvent } from '@nuxt/ui'
 import { z } from 'zod'
-import { isEqual } from 'lodash'
+// import _ from 'lodash'
 import { UForm } from '#components'
 
 const { t } = useI18n()
