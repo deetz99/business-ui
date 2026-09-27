@@ -1,25 +1,35 @@
 /* eslint-disable max-len */
 import { cloneDeep } from 'es-toolkit'
+import { getCachedOrFetch } from '#business/app/services/helpers'
 
 export const useCorrectionStore = defineStore('correction-store', () => {
   const service = useBusinessService()
-  const { tableState: tableDirectors } = useManageParties()
-  const { tableState: tableReceivers } = useManageParties('manage-receivers')
-  const { tableState: tableLiquidators } = useManageParties('manage-liquidators')
-  const { tableState: tableCustodians } = useManageParties('manage-custodians')
-  const { tableState: tableOffices, hasChanges: hasOfficeChange } = useManageOffices()
-  const { shareClasses: tableShareClasses, resolutionDates, hasChanges: hasShareStructureChange } = useManageShareStructure()
-  const { tableState: tableNameTranslations, hasChanges: hasNameTranslationChange } = useManageNameTranslations('manage-company-name-name-translations')
-  const { state: companyName, hasNameChange: hasCompanyNameChange, updateState: updateCompanyName } = useManageCompanyName()
-  const { tableState: tableCourtOrders } = useManageCourtOrders()
-  const { tableState: tableAmalgamation, statementState } = useManageAmalgamation()
   const { getPartiesMergedWithRelationships } = useBusinessParty()
   const { getCommonFilingPayloadData, initFiling, createFilingPayload } = useFiling()
   const businessStore = useBusinessStore()
 
+  const {
+    amalgamation,
+    amalStmnt,
+    courtOrders,
+    directors,
+    receivers,
+    liquidators,
+    custodians,
+    offices,
+    shareClasses,
+    resolutionDates,
+    nameTranslations,
+    yourCompany,
+    hasNameTranslationChange,
+    hasOfficeChange,
+    hasShareStructureChange
+  } = useCorrectionHelper()
+
   const initializing = ref<boolean>(false)
   const draftFilingState = shallowRef<CorrectionDraftState>({} as CorrectionDraftState)
   const requireResolutionDate = ref(false)
+  const businessExtended = shallowRef<BusinessDataExtended | undefined>({})
 
   const formState = reactive<CorrectionFormSchema>({} as CorrectionFormSchema)
   const initialFormState = shallowRef<CorrectionFormSchema>({} as CorrectionFormSchema)
@@ -41,23 +51,6 @@ export const useCorrectionStore = defineStore('correction-store', () => {
       formState.comment = value
     }
   })
-
-  /** True when any sub-form inside the correction form is currently open/active */
-  const hasActiveSubForm = computed(() =>
-    !!formState.activeNameRequest
-    || !!formState.activeNameTranslation
-    || !!formState.activeOffice
-    || !!formState.activeDirector
-    || !!formState.activeReceiver
-    || !!formState.activeLiquidator
-    || !!formState.activeCustodian
-    || !!formState.activeClass
-    || !!formState.activeSeries
-    || !!formState.activeResolutionDate
-    || !!formState.activeCourtOrder
-    || !!formState.activeAmal
-    || !!formState.activeAmalStmnt
-  )
 
   /** The original filing being corrected (fetched by correctedFilingId) */
   const correctedFiling = shallowRef<FilingGetByIdResponse<FilingRecord> | undefined>(undefined)
@@ -100,7 +93,7 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     $reset()
     initializing.value = true
 
-    const { draftFiling, parties: allParties, shareClasses } = await initFiling<CorrectionFiling>(
+    const { draftFiling, parties: allParties, shareClasses: shareClassData } = await initFiling<CorrectionFiling>(
       businessId,
       FilingType.CORRECTION,
       undefined,
@@ -116,18 +109,15 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     }
 
     const [
-      addresses,
+      addressData,
       aliasesNameTranslations,
-      courtOrders,
-      amalgamation
+      courtOrderData,
+      businessExtendedData
     ] = await Promise.all([
       service.getAddresses(businessId).catch(() => undefined),
       service.getNameTranslations(businessId).catch(() => [] as NameTranslation[]),
       service.getCourtOrders(businessId).catch(() => [] as CourtOrderResponse[]),
-      service.getBusinessExtended(businessId, true, FilingType.AMALGAMATION_APPLICATION).catch(() => ({
-        amalgamatingBusinesses: [],
-        courtApproval: false
-      }) as Amalgamation)
+      getCachedOrFetch<BusinessDataExtended>(useBusinessQuery().businessExtOptions(businessId, true), false).catch(() => undefined)
     ])
 
     // The draft is always expected to exist (pre-created before page load)
@@ -140,11 +130,14 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     correctedFilingDate.value = draft.correctedFilingDate ?? ''
     correctionType.value = draft.type
 
+    // Set business extended data (Used for amalgamationApplication, amalgamationOut, coninuationOut or continuationIn corrections)
+    businessExtended.value = businessExtendedData
+
     // Filter the single parties response by role type (UI enum — data is already formatted)
-    const parties = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.DIRECTOR))
-    const receivers = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.RECEIVER))
-    const liquidators = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.LIQUIDATOR))
-    const custodians = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.CUSTODIAN))
+    const directorData = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.DIRECTOR))
+    const receiverData = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.RECEIVER))
+    const liquidatorData = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.LIQUIDATOR))
+    const custodianData = allParties?.filter(p => p.new.roles.some(r => r.roleType === RoleTypeUi.CUSTODIAN))
 
     // Comment (may be empty on initial draft)
     formState.comment = { detail: draft.comment ?? '' }
@@ -192,22 +185,22 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     // Draft relationships from the pre-created correction draft (new format with `entity`)
     const draftRelationships = draft?.relationships as BusinessRelationship[] | undefined
 
-    // Parties / Directors — use getPartiesMergedWithRelationships for clean merging
-    if (parties) {
+    // Directors — use getPartiesMergedWithRelationships for clean merging
+    if (directorData) {
       const draftDirectorEntries = draftRelationships?.filter(
         dp => dp.roles?.some(r => r.roleType === RoleType.DIRECTOR)
       )
-      tableDirectors.value = draftDirectorEntries?.length
-        ? getPartiesMergedWithRelationships(parties, draftDirectorEntries)
-        : parties
+      directors.value = draftDirectorEntries?.length
+        ? getPartiesMergedWithRelationships(directorData, draftDirectorEntries)
+        : directorData
     }
 
     // Offices (corrections may include address changes)
-    tableOffices.value = formatOfficesSection(addresses, draft?.offices)
+    offices.value = formatOfficesSection(addressData, draft?.offices)
 
     // Share structure
-    if (shareClasses) {
-      const originalClasses = formatShareClassesUi(shareClasses)
+    if (shareClassData) {
+      const originalClasses = formatShareClassesUi(shareClassData)
 
       if (draft?.shareStructure?.shareClasses?.length) {
         // Draft share classes may use singular `action` (e.g. "EDITED") from the API —
@@ -236,9 +229,9 @@ export const useCorrectionStore = defineStore('correction-store', () => {
           }
         }
 
-        tableShareClasses.value = draftClasses
+        shareClasses.value = draftClasses
       } else {
-        tableShareClasses.value = originalClasses
+        shareClasses.value = originalClasses
       }
     }
 
@@ -254,33 +247,33 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     }
 
     // Receivers — merge with draft relationships if applicable
-    if (receivers) {
+    if (receiverData) {
       const draftReceiverEntries = draftRelationships?.filter(
         dp => dp.roles?.some(r => r.roleType === RoleType.RECEIVER)
       )
-      tableReceivers.value = draftReceiverEntries?.length
-        ? getPartiesMergedWithRelationships(receivers, draftReceiverEntries)
-        : receivers
+      receivers.value = draftReceiverEntries?.length
+        ? getPartiesMergedWithRelationships(receiverData, draftReceiverEntries)
+        : receiverData
     }
 
     // Liquidators — merge with draft relationships if applicable
-    if (liquidators) {
+    if (liquidatorData) {
       const draftLiquidatorEntries = draftRelationships?.filter(
         dp => dp.roles?.some(r => r.roleType === RoleType.LIQUIDATOR)
       )
-      tableLiquidators.value = draftLiquidatorEntries?.length
-        ? getPartiesMergedWithRelationships(liquidators, draftLiquidatorEntries)
-        : liquidators
+      liquidators.value = draftLiquidatorEntries?.length
+        ? getPartiesMergedWithRelationships(liquidatorData, draftLiquidatorEntries)
+        : liquidatorData
     }
 
     // Custodians — merge with draft relationships if applicable
-    if (custodians) {
+    if (custodianData) {
       const draftCustodianEntries = draftRelationships?.filter(
         dp => dp.roles?.some(r => r.roleType === RoleType.CUSTODIAN)
       )
-      tableCustodians.value = draftCustodianEntries?.length
-        ? getPartiesMergedWithRelationships(custodians, draftCustodianEntries)
-        : custodians
+      custodians.value = draftCustodianEntries?.length
+        ? getPartiesMergedWithRelationships(custodianData, draftCustodianEntries)
+        : custodianData
     }
 
     // Name translations — convert API format to table state, merge with draft if applicable
@@ -288,48 +281,52 @@ export const useCorrectionStore = defineStore('correction-store', () => {
       const originalTableState = mapOriginalNameTranslations(aliasesNameTranslations)
 
       if (draft?.nameTranslations?.length) {
-        tableNameTranslations.value = mergeDraftNameTranslations(originalTableState, draft.nameTranslations)
+        nameTranslations.value = mergeDraftNameTranslations(originalTableState, draft.nameTranslations)
       } else {
-        tableNameTranslations.value = originalTableState
+        nameTranslations.value = originalTableState
       }
     } else if (draft?.nameTranslations?.length) {
       // No existing translations, but draft has new ones
-      tableNameTranslations.value = mapDraftOnlyNameTranslations(draft.nameTranslations)
+      nameTranslations.value = mapDraftOnlyNameTranslations(draft.nameTranslations)
     }
 
     // set `Your Company` data
-    const originalName = businessStore.business?.legalName ?? ''
-    companyName.value.old.legalName = originalName
-    companyName.value.old.actions = []
-    companyName.value.new = cloneDeep(companyName.value.old)
-    if (draft?.nameRequest) {
-      updateCompanyName({
-        legalName: draft.nameRequest.legalName,
-        nrNumber: draft.nameRequest.nrNumber ?? '',
-        changeToNumbered: false
-      })
+    const draftYourCompanyData = {
+      continuationIn: draft.continuationIn,
+      continuationOut: draft.continuationOut,
+      amalgamationOut: draft.amalgamationOut,
+      nameRequest: draft.nameRequest
     }
 
-    const formattedCourtOrders = formatCourtOrdersSection(courtOrders, draft.courtOrders)
-    tableCourtOrders.value = formattedCourtOrders
+    yourCompany.value = formatYourCompanySection(
+      businessStore.business,
+      businessExtendedData,
+      draftYourCompanyData,
+      correctedFilingType.value
+    )
 
-    const formattedAmalgamation = formatAmalCorrectSection(amalgamation, draft.amalgamation)
-    tableAmalgamation.value = formattedAmalgamation.tableState
-    statementState.value = formattedAmalgamation.statementState
+    const formattedCourtOrders = formatCourtOrdersSection(courtOrderData, draft.courtOrders)
+    courtOrders.value = formattedCourtOrders
+
+    if (businessExtendedData?.amalgamation) {
+      const formattedAmalgamation = formatAmalCorrectSection(businessExtendedData.amalgamation, draft.amalgamation)
+      amalgamation.value = formattedAmalgamation.tableState
+      amalStmnt.value = formattedAmalgamation.statementState
+    }
 
     await nextTick()
     initialFormState.value = cloneDeep(formState)
-    initialDirectors.value = cloneDeep(tableDirectors.value)
-    initialReceivers.value = cloneDeep(tableReceivers.value)
-    initialLiquidators.value = cloneDeep(tableLiquidators.value)
-    initialCustodians.value = cloneDeep(tableCustodians.value)
-    initialOffices.value = cloneDeep(tableOffices.value)
-    initialShareClasses.value = cloneDeep(tableShareClasses.value)
-    initialNameTranslations.value = cloneDeep(tableNameTranslations.value)
+    initialDirectors.value = cloneDeep(directors.value)
+    initialReceivers.value = cloneDeep(receivers.value)
+    initialLiquidators.value = cloneDeep(liquidators.value)
+    initialCustodians.value = cloneDeep(custodians.value)
+    initialOffices.value = cloneDeep(offices.value)
+    initialShareClasses.value = cloneDeep(shareClasses.value)
+    initialNameTranslations.value = cloneDeep(nameTranslations.value)
     initialResolutionDates.value = cloneDeep(resolutionDates.value)
-    initialCourtOrders.value = cloneDeep(tableCourtOrders.value)
-    initialAmalgamation.value = cloneDeep(tableAmalgamation.value)
-    initialAmalStmnt.value = cloneDeep(statementState.value)
+    initialCourtOrders.value = cloneDeep(courtOrders.value)
+    initialAmalgamation.value = cloneDeep(amalgamation.value)
+    initialAmalStmnt.value = cloneDeep(amalStmnt.value)
 
     // Fee: STAFF type corrections = no fee, CLIENT type corrections = $20 (CRCTN fee code)
     if (isStaffCorrectionType.value) {
@@ -346,8 +343,8 @@ export const useCorrectionStore = defineStore('correction-store', () => {
    * @param isSubmission - true to submit for processing, false to save as draft
    */
   async function submit(isSubmission: boolean) {
-    const regOffice = tableOffices.value.find(o => o.new.type === OfficeType.REGISTERED)?.new.address
-    const recOffice = tableOffices.value.find(o => o.new.type === OfficeType.RECORDS)?.new.address
+    const regOffice = offices.value.find(o => o.new.type === OfficeType.REGISTERED)?.new.address
+    const recOffice = offices.value.find(o => o.new.type === OfficeType.RECORDS)?.new.address
 
     const correctionPayload: CorrectionPayload = {
       comment: formState.comment?.detail ?? '',
@@ -360,10 +357,10 @@ export const useCorrectionStore = defineStore('correction-store', () => {
       // Parties — formatted as relationships (with `entity`), matching transition store pattern
       // All party types (directors, receivers, liquidators, completing party) are combined in one array
       relationships: [
-        ...tableDirectors.value,
-        ...tableReceivers.value,
-        ...tableLiquidators.value,
-        ...tableCustodians.value
+        ...directors.value,
+        ...receivers.value,
+        ...liquidators.value,
+        ...custodians.value
       ].map(entry => formatRelationshipApi(entry.new)).concat(
         // Completing party (client corrections) — submitted as a relationship
         formState.completingParty?.lastName
@@ -382,7 +379,7 @@ export const useCorrectionStore = defineStore('correction-store', () => {
       // Share structure
       ...(hasShareStructureChange.value && {
         shareStructure: {
-          shareClasses: formatShareClassesApi(tableShareClasses.value, isSubmission),
+          shareClasses: formatShareClassesApi(shareClasses.value, isSubmission),
           resolutionDates: formatResolutionDatesApi(resolutionDates.value)
         }
       }),
@@ -409,7 +406,7 @@ export const useCorrectionStore = defineStore('correction-store', () => {
       // - oldName: only when the name was actually changed
       // - action: the correction action
       ...(hasNameTranslationChange.value && {
-        nameTranslations: tableNameTranslations.value
+        nameTranslations: nameTranslations.value
           .filter(nt => nt.new.actions.length > 0)
           .map(nt => ({
             ...(nt.old ? { id: nt.new.id } : {}),
@@ -419,17 +416,18 @@ export const useCorrectionStore = defineStore('correction-store', () => {
           }))
       }),
 
-      ...(hasCompanyNameChange.value && {
-        nameRequest: {
-          legalName: companyName.value.new.legalName,
-          nrNumber: companyName.value.new.nrNumber
-        }
-      }),
+      // ...(hasCompanyNameChange.value && {
+      //   nameRequest: {
+      //     legalName: companyName.value.new.legalName,
+      //     nrNumber: companyName.value.new.nrNumber
+      //   }
+      // }),
 
-      courtOrders: formatCourtOrdersApi(tableCourtOrders.value),
+      courtOrders: formatCourtOrdersApi(courtOrders.value),
 
-      amalgamation: formatAmalCorrectApi(tableAmalgamation.value, statementState.value)
+      amalgamation: formatAmalCorrectApi(amalgamation.value, amalStmnt.value),
 
+      ...formatCorrectYourCompanyApi(yourCompany.value, businessExtended.value, correctedFilingType.value)
       // TODO: startDate, provisionsRemoved
       // as correction sections are implemented in the UI
     }
@@ -452,6 +450,9 @@ export const useCorrectionStore = defineStore('correction-store', () => {
       delete header.certifiedBy
       delete header.authorizationReceived
     }
+
+    console.log('YOUR_COMPANY: ', yourCompany.value)
+    console.log('PAYLOAD: ', filingPayload)
 
     // Draft is always pre-created, so we always have a filingId to update
     const filingId = draftFilingState.value?.filing?.header?.filingId
@@ -516,7 +517,7 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     formState.activeAmal = undefined
     formState.activeAmalStmnt = undefined
 
-    tableNameTranslations.value = []
+    nameTranslations.value = []
 
     initialFormState.value = cloneDeep(formState)
     initialDirectors.value = []
@@ -547,17 +548,17 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     correctionType,
     requireResolutionDate,
     isStaffCorrectionType,
-    courtOrders: tableCourtOrders,
-    directors: tableDirectors,
-    receivers: tableReceivers,
-    liquidators: tableLiquidators,
-    custodians: tableCustodians,
-    offices: tableOffices,
-    shareClasses: tableShareClasses,
+    courtOrders,
+    directors,
+    receivers,
+    liquidators,
+    custodians,
+    offices,
+    shareClasses,
     resolutionDates,
-    nameTranslations: tableNameTranslations,
-    amalgamation: tableAmalgamation,
-    amalStmnt: statementState,
+    nameTranslations,
+    amalgamation,
+    amalStmnt,
     initialFormState,
     initialDirectors,
     initialReceivers,
@@ -570,9 +571,7 @@ export const useCorrectionStore = defineStore('correction-store', () => {
     initialCourtOrders,
     initialAmalgamation,
     initialAmalStmnt,
-    hasActiveSubForm,
     isStaff,
-    companyName,
     init,
     submit,
     syncResolutionTableState,
